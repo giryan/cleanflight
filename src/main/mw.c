@@ -88,8 +88,10 @@ enum {
     ALIGN_MAG = 2
 };
 
-/* for VBAT monitoring frequency */
-#define VBATFREQ 6        // to read battery voltage - nth number of loop iterations
+/* VBAT monitoring interval (in microseconds) - 1s*/
+#define VBATINTERVAL (6 * 3500)       
+/* IBat monitoring interval (in microseconds) - 6 default looptimes */
+#define IBATINTERVAL (6 * 3500)       
 
 uint32_t currentTime = 0;
 uint32_t previousTime = 0;
@@ -174,10 +176,8 @@ void annexCode(void)
     int32_t tmp, tmp2;
     int32_t axis, prop1 = 0, prop2;
 
-    static batteryState_e batteryState = BATTERY_OK;
-    static uint8_t vbatTimer = 0;
-    static int32_t vbatCycleTime = 0;
-
+    static uint32_t vbatLastServiced = 0;
+    static uint32_t ibatLastServiced = 0;
     // PITCH & ROLL only dynamic PID adjustment,  depending on throttle value
     if (rcData[THROTTLE] < currentControlRateProfile->tpa_breakpoint) {
         prop2 = 100;
@@ -240,31 +240,26 @@ void annexCode(void)
 
     if (FLIGHT_MODE(HEADFREE_MODE)) {
         float radDiff = degreesToRadians(heading - headFreeModeHold);
-        float cosDiff = cosf(radDiff);
-        float sinDiff = sinf(radDiff);
+        float cosDiff = cos_approx(radDiff);
+        float sinDiff = sin_approx(radDiff);
         int16_t rcCommand_PITCH = rcCommand[PITCH] * cosDiff + rcCommand[ROLL] * sinDiff;
         rcCommand[ROLL] = rcCommand[ROLL] * cosDiff - rcCommand[PITCH] * sinDiff;
         rcCommand[PITCH] = rcCommand_PITCH;
     }
 
-    if (feature(FEATURE_VBAT | FEATURE_CURRENT_METER)) {
-        vbatCycleTime += cycleTime;
-        if (!(++vbatTimer % VBATFREQ)) {
+    if (feature(FEATURE_VBAT)) {
+        if ((int32_t)(currentTime - vbatLastServiced) >= VBATINTERVAL) {
+            vbatLastServiced = currentTime;
+            updateBattery();
+        }
+    }
 
-            if (feature(FEATURE_VBAT)) {
-                updateBatteryVoltage();
-                batteryState = calculateBatteryState();
-                //handle beepers for battery levels
-                if (batteryState == BATTERY_CRITICAL)
-                    beeper(BEEPER_BAT_CRIT_LOW);    //critically low battery
-                else if (batteryState == BATTERY_WARNING)
-                    beeper(BEEPER_BAT_LOW);         //low battery
-            }
+    if (feature(FEATURE_CURRENT_METER)) {
+        int32_t ibatTimeSinceLastServiced = (int32_t) (currentTime - ibatLastServiced);
 
-            if (feature(FEATURE_CURRENT_METER)) {
-                updateCurrentMeter(vbatCycleTime, &masterConfig.rxConfig, masterConfig.flight3DConfig.deadband3d_throttle);
-            }
-            vbatCycleTime = 0;
+        if (ibatTimeSinceLastServiced >= IBATINTERVAL) {
+            ibatLastServiced = currentTime;
+            updateCurrentMeter((ibatTimeSinceLastServiced / 1000), &masterConfig.rxConfig, masterConfig.flight3DConfig.deadband3d_throttle);
         }
     }
 
@@ -780,7 +775,7 @@ void loop(void)
         // Allow yaw control for tricopters if the user wants the servo to move even when unarmed.
         if (isUsingSticksForArming() && rcData[THROTTLE] <= masterConfig.rxConfig.mincheck
 #ifndef USE_QUAD_MIXER_ONLY
-                && !(masterConfig.mixerMode == MIXER_TRI && masterConfig.mixerConfig.tri_unarmed_servo)
+                && !((masterConfig.mixerMode == MIXER_TRI || masterConfig.mixerMode == MIXER_CUSTOM_TRI) && masterConfig.mixerConfig.tri_unarmed_servo)
                 && masterConfig.mixerMode != MIXER_AIRPLANE
                 && masterConfig.mixerMode != MIXER_FLYING_WING
 #endif
